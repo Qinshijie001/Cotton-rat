@@ -1,0 +1,131 @@
+setwd('./')
+library(Seurat)
+library(tidyverse)
+library(patchwork)
+library(cowplot)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+library(ggrepel)
+library(ggpubr)
+library(ggbreak)
+library(readxl)
+
+my36colors <-c( '#53A85F', '#E5D2DD', '#AA9A59', '#E95C59', '#D6E7A3', '#57C3F3',
+                '#F4A460', '#F3B1A0', '#9ACD32', '#AB3282', '#DDA0DD', '#91D0BE', 
+                '#8C549C', '#585658', '#9FA3A8', '#E0D4CA', '#5F3D69', '#C5DEBA',
+                '#58A4C3', '#E4C755', '#F7F398', '#F1BB72', '#E63863', '#E39A35',
+                '#C1E6F3', '#6778AE', '#BD956A', '#B53E2B', '#712820', '#DCC1DD',
+                '#EE6A50', '#CCC9E6', '#625D9E', '#68A180', '#3A6963', '#968175')
+
+my36colors1 <- paste0(my36colors,'50')
+group_color <- c('#53A85F','#E5D2DD','#E95C59', '#F3B1A0')
+
+scRNA_lung <- readRDS('../lung/soupx/scRNA_merge2_rsv.RDS')
+scRNA_nasal <- readRDS('../nasal/soupx/scRNA_merge2_rsv.RDS')
+Idents(scRNA_lung) <- 'cell_name'
+Idents(scRNA_nasal) <- 'cell_name'
+scRNA_lung1 <- subset(scRNA_lung,subset= rsv_load_log_soupx>0)
+scRNA_nasal1 <- subset(scRNA_nasal,subset= rsv_load_log_soupx>0)
+
+scRNA_merge2_rsv <- merge(scRNA_lung1,scRNA_nasal1)
+meta_rsv <- scRNA_merge2_rsv@meta.data
+#Calculate the correlation between host genes and RSV viral load
+exp_rsv_umi <- as.data.frame(scRNA_merge2_rsv@assays$RNA@counts)
+exp_rsv_data <- as.data.frame(scRNA_merge2_rsv@assays$RNA@data)
+genes.keep <- rowSums(exp_rsv_umi > 0) >= floor(0.05 * ncol(exp_rsv_umi))
+exp_rsv_data <- exp_rsv_data[genes.keep,]
+
+data_spearman <- data.frame()
+for (i in rownames(exp_rsv_data)){
+  cor.value <- cor(as.numeric(exp_rsv_data[i,]),meta_rsv$rsv_load_log_soupx,method = 'spearman')
+  cor.p <- cor.test(as.numeric(exp_rsv_data[i,]),meta_rsv$rsv_load_log_soupx,method = 'spearman')
+  temp <- data.frame(gene=i,spearman_value=cor.value,pvalue=cor.p$p.value)
+  data_spearman <- rbind(data_spearman,temp)
+}
+data_spearman$fdr <- p.adjust(data_spearman$pvalue,method = 'fdr')
+write.csv(data_spearman,'data_spearman.csv',quote = F)
+table(data_spearman$fdr<0.01)
+write.csv(subset(data_spearman,fdr<0.05 & abs(data_spearman$pvalue)>=0.1),'data_spearman.sig.csv',quote = F)
+
+data_pearson <- data.frame()
+for (i in rownames(exp_rsv_data)){
+  cor.value <- cor(as.numeric(exp_rsv_data[i,]),meta_rsv$rsv_load_log_soupx,method = 'pearson')
+  cor.p <- cor.test(as.numeric(exp_rsv_data[i,]),meta_rsv$rsv_load_log_soupx,method = 'pearson')
+  temp <- data.frame(gene=i,pearson_value=cor.value,pvalue=cor.p$p.value)
+  data_pearson <- rbind(data_pearson,temp)
+}
+data_pearson$fdr <- p.adjust(data_pearson$pvalue,method = 'fdr')
+write.csv(data_pearson,'data_pearson.csv',quote = F)
+table(data_pearson$fdr<0.01)
+write.csv(subset(data_pearson,fdr<0.05 & abs(data_pearson$value)>=0.1),'data_pearson.sig.csv',quote = F)
+
+#
+volcano=data_pearson
+rownames(volcano) <- volcano$gene
+volcano <- volcano[order(volcano$pearson_value),]
+volcano$symbol <- gsub('.','_',volcano$gene,fixed = T)
+volcano$symbol <- gsub('.+_','',volcano$symbol)
+volcano$threshold[volcano$fdr <= 0.05 & volcano$pearson_value>=0.1 ] = "Pos"
+volcano$threshold[volcano$fdr <= 0.05 & volcano$pearson_value<=-0.1 ] = "Neg"
+volcano$threshold[volcano$fdr > 0.05 | (volcano$fdr < 0.05 & abs(volcano$pearson_value) < 0.1) ] = "Ns"
+text_repel_pos <- tail(volcano,10)
+text_repel_neg <- head(volcano,10)
+text_repel <- c(text_repel_pos$symbol,text_repel_neg$symbol)
+volcano$logFDR <- -1*log10(volcano$fdr)
+volcano1 <- volcano[order(volcano$pearson_value),]
+volcano1$rank <- c(1:nrow(volcano1))
+
+ggplot(volcano1,aes(rank,pearson_value))+geom_point(alpha=0.8,size=0.6,color='gray')+
+  geom_text_repel(data=subset(volcano1, symbol %in% text_repel), aes(label=symbol),col='black',alpha = 1,size=1)+
+  geom_point(data = head(volcano1,10),aes(rank,pearson_value),alpha=0.5,size=1,color="#0072B5")+
+  geom_point(data = tail(volcano1,10),aes(rank,pearson_value),alpha=0.5,size=1,color="#FF6666")+theme_test()
+ggsave('viral_load_pearson.pdf',width = 4,height = 4)
+
+#
+library(clusterProfiler)
+library(enrichplot)
+
+GO <- read.table('GO_enrich_blast_name.txt',header = T,sep = '\t',quote = '')
+GO <- subset(GO,V2 %in% names(table(GO$V2)[table(GO$V2)>5]))
+BP <- subset(GO,V4=='biological_process',select = c('V3','blast_name1'))
+colnames(BP) <- c("TERM","GENE")
+
+KEGG <- read.table('KEGG_enrich_blast_name.txt',header = T,sep = '\t',quote = '')
+KEGG <- subset(KEGG,V2 %in% names(table(KEGG$V2)[table(KEGG$V2)>5])) 
+KEGG$pathway <-  paste(KEGG$V2,KEGG$V3,sep = ' ')
+KEGG <- KEGG[,c('pathway','blast_name1')]
+colnames(KEGG) <- c("TERM","GENE")
+
+#
+pearson.list <-list(pos=subset(pair,threshold=='Pos')$gene,neg=subset(pair,threshold=='Neg')$gene)
+pearson.go <- data.frame()
+for (i in names(pearson.list)){
+  go_temp <- enricher(pearson.list[[i]],TERM2GENE = BP,pAdjustMethod = "BH",pvalueCutoff=1,qvalueCutoff = 1,minGSSize = 20)
+  go_temp1 <- as.data.frame(go_temp)
+  go_temp1$group <- rep(i,nrow(go_temp1))
+  pearson.go <- rbind(pearson.go,go_temp1)
+}
+write.csv(pearson.go,'pearson.go.csv',quote = F)
+pearson.go1 <- pearson.go %>% group_by(group) %>% top_n(n=-18,wt=pvalue)
+pearson.go1$Description1 <- factor(pearson.go1$Description,levels = unique(pearson.go1$Description))
+ggplot(pearson.go1,aes(group,Description1))+geom_point(aes(size=Count,color=pvalue))+theme_bw()+
+  scale_colour_gradient(low="#CD3700",high="gray")+theme(axis.title= element_text(size=7, color="black"),
+  axis.text.x=element_text(size=7,color = "black",angle = 90,hjust = 1,vjust = 0.4), 
+   axis.text.y=element_text(size=7,color = "black"))+scale_size(range=c(1, 3))
+
+##
+pearson.kegg <- data.frame()
+for (i in names(pearson.list)){
+  go_temp <- enricher(pearson.list[[i]],TERM2GENE = KEGG,pAdjustMethod = "BH",pvalueCutoff=1,qvalueCutoff = 1)
+  go_temp1 <- as.data.frame(go_temp)
+  go_temp1$group <- rep(i,nrow(go_temp1))
+  pearson.kegg <- rbind(pearson.kegg,go_temp1)
+}
+write.csv(pearson.kegg,'pearson.kegg.csv',quote = F)
+pearson.kegg1 <- pearson.kegg %>% group_by(group) %>% top_n(n=-20,wt=pvalue)
+pearson.kegg1$Description1 <- factor(pearson.kegg1$Description,levels = unique(pearson.kegg1$Description))
+ggplot(pearson.kegg1,aes(group,Description1))+geom_point(aes(size=Count,color=pvalue))+theme_bw()+
+  scale_colour_gradient(low="#CD3700",high="gray")+theme(axis.title= element_text(size=7, color="black"),
+  axis.text.x=element_text(size=7,color = "black",angle = 90,hjust = 1,vjust = 0.4), 
+  axis.text.y=element_text(size=7,color = "black"))+scale_size(range=c(1, 3))
